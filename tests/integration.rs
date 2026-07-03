@@ -1,17 +1,13 @@
-//! End-to-end integration tests that exercise the public library API
-//! against a sandboxed `HOME` (via `Paths::resolve_under`).
+//! End-to-end integration tests for the library API.
 //!
 //! These do NOT spawn the binary -- they call into the lib so we can
-//! pass a synthetic home directory. The CLI subcommands are tested
-//! separately by `cli_smoke.rs` via `assert_cmd`, where the test
-//! fixture mutates the env.
+//! pass a synthetic home directory. CLI subcommand behavior is
+//! tested by `cli_smoke.rs` via `assert_cmd`.
 
 use claude_go::paths::Paths;
 use claude_go::provider::{CustomProviderEntry, ProviderFormat};
 use claude_go::settings::{self, SettingsState, TurnOnInputs};
 use claude_go::provider::{self, ModelSource};
-use claude_go::proxy::Proxy;
-use claude_go::proxy::ProxyState;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -254,20 +250,6 @@ fn custom_provider_rejects_builtin_id() {
 }
 
 #[test]
-fn proxy_lifecycle_start_stop_idempotent() {
-    let home = fresh_home();
-    let paths = Paths::resolve_under(&home);
-    let proxy = Proxy::new(&paths);
-
-    // Initial state: stopped.
-    assert_eq!(proxy.current_state(), ProxyState::Stopped);
-
-    // stop() on a stopped proxy is a no-op.
-    assert!(proxy.stop().is_ok());
-    assert!(proxy.stop().is_ok());
-}
-
-#[test]
 fn settings_state_reports_enabled_iff_full_block() {
     let home = fresh_home();
     let paths = Paths::resolve_under(&home);
@@ -292,4 +274,63 @@ fn settings_state_reports_enabled_iff_full_block() {
     assert!(s1.enabled);
     assert_eq!(s1.model, "minimax-m3");
     assert_eq!(s1.path_kind, claude_go::settings::PathKind::Anthropic);
+}
+
+// ── TTY module ────────────────────────────────────────────────────────
+
+#[test]
+fn status_report_round_trips_disabled() {
+    let home = fresh_home();
+    let paths = Paths::resolve_under(&home);
+    let report = claude_go::tty::StatusReport::from_paths(&paths);
+    assert!(!report.enabled);
+    assert_eq!(report.model, "");
+    assert_eq!(report.base_url, "");
+    assert_eq!(report.path_kind, "other");
+    assert_eq!(report.version, 1);
+    // JSON form is parseable and stable.
+    let s = serde_json::to_string(&report).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(v["enabled"], false);
+    assert_eq!(v["version"], 1);
+}
+
+#[test]
+fn status_report_round_trips_enabled() {
+    let home = fresh_home();
+    let paths = Paths::resolve_under(&home);
+    let provider = test_provider("opencode-go", "https://opencode.ai/zen/go", ProviderFormat::Anthropic);
+    settings::turn_on(
+        &paths,
+        &TurnOnInputs {
+            provider: &provider,
+            model: "minimax-m3",
+            format: ProviderFormat::Anthropic,
+            port: None,
+            auth_token: "sk-test",
+        },
+    )
+    .unwrap();
+    let report = claude_go::tty::StatusReport::from_paths(&paths);
+    assert!(report.enabled);
+    assert_eq!(report.model, "minimax-m3");
+    assert_eq!(report.base_url, "https://opencode.ai/zen/go");
+    assert_eq!(report.path_kind, "anthropic");
+}
+
+#[test]
+fn tty_check_respects_term_env() {
+    // TERM=dumb should suppress TUI.
+    // SAFETY: test-only env mutation; we set/restore in the same
+    // process. Other tests in this binary don't depend on TERM
+    // at runtime, only on `should_launch_tui`'s contract.
+    let saved = std::env::var("TERM").ok();
+    // SAFETY: same as above.
+    unsafe { std::env::set_var("TERM", "dumb"); }
+    assert!(!claude_go::tty::should_launch_tui());
+    // Restore (or remove) the prior TERM.
+    match saved {
+        Some(v) => unsafe { std::env::set_var("TERM", v); },
+        None => unsafe { std::env::remove_var("TERM"); },
+    }
 }

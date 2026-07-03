@@ -87,7 +87,11 @@ impl SettingsState {
         Self::peek(&Paths::resolve())
     }
 
-    fn disabled_default() -> Self {
+    /// A default "disabled" settings state, used as the fallback when
+    /// `peek` fails. Public so other modules (e.g. the TTY fallback in
+    /// `tty.rs`) can construct a known-disabled state without having
+    /// to fake up a `Paths`.
+    pub fn disabled_default() -> Self {
         Self {
             enabled: false,
             base_url: String::new(),

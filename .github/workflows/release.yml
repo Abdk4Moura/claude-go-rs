@@ -28,6 +28,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: claude-go-macos-aarch64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: claude-go-windows-x86_64.exe
 
     steps:
       - uses: actions/checkout@v4

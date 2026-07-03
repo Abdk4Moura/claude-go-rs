@@ -5,7 +5,6 @@ use ratatui::Frame;
 
 use super::app::{App, Screen, StatusKind};
 use super::style;
-use crate::proxy::ProxyState;
 use crate::settings::PathKind;
 
 pub fn render(f: &mut Frame, app: &App) {
@@ -292,31 +291,21 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
         "  Proxy",
         style::title_style(),
     )));
-    match &app.proxy_state {
-        ProxyState::Healthy { port, pid } => {
+    match app.proxy_port {
+        Some(port) => {
             lines.push(Line::from(vec![
                 Span::styled("    state          ", style::body_dim_style()),
-                Span::styled("running", style::on_indicator_style()),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("    pid            ", style::body_dim_style()),
-                Span::styled(pid.to_string(), style::body_style()),
+                Span::styled("running (in-process)", style::on_indicator_style()),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("    port           ", style::body_dim_style()),
                 Span::styled(port.to_string(), style::body_style()),
             ]));
         }
-        ProxyState::Stopped => {
+        None => {
             lines.push(Line::from(vec![
                 Span::styled("    state          ", style::body_dim_style()),
-                Span::styled("stopped", style::off_indicator_style()),
-            ]));
-        }
-        ProxyState::Failed(why) => {
-            lines.push(Line::from(vec![
-                Span::styled("    state          ", style::body_dim_style()),
-                Span::styled(format!("failed: {why}"), style::error_style()),
+                Span::styled("not running", style::off_indicator_style()),
             ]));
         }
     }

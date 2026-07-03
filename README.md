@@ -66,14 +66,17 @@ Two endpoint shapes are supported out of the box:
 - **Anthropic-format** (e.g. OpenCode Go's `/v1/messages`, direct
   Anthropic, OpenRouter): direct, no proxy.
 - **OpenAI Chat Completions format** (e.g. GLM, Kimi, DeepSeek via
-  OpenCode Go): routed through the local `opencode-api` translation
-  proxy that `claude-go on` starts and `claude-go off` stops.
+  OpenCode Go): routed through an **in-process** translation proxy
+  that `claude-go` itself hosts inside the same binary (no Node, no
+  npm, no separate process).
 
-The proxy lifecycle is fully managed: `claude-go` picks a free port in
-`4141..4242`, spawns `opencode-api` under `setsid(2)` so it survives
-shell teardown, polls `/health` to confirm it's up, and on `off` sends
-`SIGTERM` to the process group (so all the Node workers die too) with
-a `SIGKILL` fallback after 2s.
+The proxy is a `tokio::task` in the same process: `claude-go on`
+binds it to `127.0.0.1:0` (OS-picks the port), writes the bound
+port into `~/.claude/settings.json`, and blocks (for OpenAI-format
+models) so the proxy stays alive. Send Ctrl-C to stop it, or run
+`claude-go off` in the same terminal. **The proxy is gone when the
+process exits**, so for OpenAI-format models, keep the `claude-go
+on` terminal open while Claude Code is running.
 
 ## Architecture
 
@@ -88,12 +91,12 @@ Claude Code
 +--------------------+
     |
     |  Anthropic-format  -> direct to provider
-    |  OpenAI-format     -> opencode-api proxy (localhost:????)
+    |  OpenAI-format     -> in-process axum server (localhost:0)
     v
 +--------------------+    +------------------+
-| Provider           |    | opencode-api     |
-| (OpenCode Go,      |    | (Node)           |
-|  OpenRouter, ...)  |    | translation proxy|
+| Provider           |    | claude-go proxy  |
+| (OpenCode Go,      |    | (axum, in-proc)  |
+|  OpenRouter, ...)  |    | Anthropic<->OpenAI|
 +--------------------+    +------------------+
 ```
 
@@ -148,45 +151,52 @@ can be removed from the TUI with `d`.
 | Path | What |
 |------|------|
 | `~/.claude/settings.json` | Claude Code's settings (claude-go owns a 10-key env block) |
-| `~/.local/share/claude-go/` | State dir (proxy.pid, proxy.port, proxy.log, marker) |
+| `~/.local/share/claude-go/` | State dir (marker file only; no per-proxy files) |
 | `~/.config/claude-go/providers.json` | Custom provider registry |
 | `~/.local/bin/claude-go` | Default install path |
 
 ## Requirements
 
-- Linux (x86_64 or aarch64) or macOS (x86_64 or Apple Silicon)
-- Node 18+ (for the `opencode-api` translation proxy when you pick an
-  OpenAI-format model)
+- Linux (x86_64 or aarch64), macOS (x86_64 or Apple Silicon), or
+  Windows (x86_64)
+- No Node.js, no npm. The OpenAI-format translation proxy runs
+  in-process in v0.2.0.
 - `OPENCODE_API_KEY` in your environment for OpenCode Go
-
-Windows is not supported in v0.1.0.
 
 ## Caveats
 
-- The TUI is a real TUI. If you're piping into a script, use the
-  subcommands instead -- they print plain text.
+- **TTY-aware no-args default.** In a real terminal, `claude-go`
+  launches the TUI. Outside a TTY (pipes, redirects, `nohup`, `cron`,
+  `systemd`, Docker, `make`, etc.), `claude-go` with no args prints
+  the current state as one JSON object on stdout and exits 0, so
+  scripts can `claude-go | jq '.enabled'` to branch. The explicit
+  `claude-go tui` subcommand works the same way and prints a hint if
+  invoked without a TTY.
+- **The in-process proxy is process-lifetime scoped.** For
+  OpenAI-format models, `claude-go on` blocks; the proxy is killed
+  when that process exits. Run Claude Code in a separate terminal
+  while `claude-go on` is alive.
 - Sub-tasks (haiku/sonnet/opus routing) all use the main model. There's
   no per-subtask dispatch in this tool.
 - Cloudflare, Vertex, and Bedrock presets are listed in the TUI but
   show "not yet implemented". OpenCode Go, Anthropic direct, and
-  OpenRouter are fully working in v0.1.0.
-- The TUI no-arg default is a breaking change from the bash v0.1.1
-  tool, which printed help. Users with muscle memory for `claude-go`
-  printing help will get a TUI.
+  OpenRouter are fully working in v0.2.0.
 
-## About the rename
+## v0.2.0 changes (from v0.1.0)
 
-This is the Rust port of `claude-go`. It currently lives at
-[`Abdk4Moura/claude-go-rs`](https://github.com/Abdk4Moura/claude-go-rs)
-because GitHub wouldn't let us reuse the `claude-go` name while the
-bash version was still published. The plan is to:
-
-1. Cut v0.1.0 from this repo (the Rust port).
-2. Use the Rust port for a few weeks.
-3. Once the bash version is fully deprecated, rename the repo to
-   `claude-go` and cut v0.2.0.
-
-Until then, `curl ... | bash` from this repo gets you the Rust tool.
+- **TTY-safe launch.** `claude-go` no longer crashes in non-TTY
+  contexts. Prints status JSON for scripts; prints the TTY hint
+  when the `tui` subcommand is invoked without a TTY.
+- **Self-contained binary.** Dropped the Node.js + `opencode-api`
+  dependency. The translation proxy now runs as a `tokio::task`
+  inside the same binary (`axum`-based HTTP server bound to
+  `127.0.0.1:0`). No more `npm install`, no more separate
+  process, no more PID or port files on disk.
+- **Windows support.** axum 0.7 builds on Windows; the CI matrix
+  adds `x86_64-pc-windows-msvc`.
+- **Smaller memory footprint.** No Node runtime. ~10 MB resident
+  (was ~30 MB with Node + `opencode-api`).
+- **Faster proxy startup.** ~30 ms (was ~500 ms Node cold start).
 
 ## Development
 

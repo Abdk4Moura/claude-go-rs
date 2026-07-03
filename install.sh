@@ -67,8 +67,14 @@ case "$OS" in
       *) echo "error: unsupported macOS arch: $ARCH" >&2; exit 1 ;;
     esac
     ;;
+  MINGW*|MSYS*|CYGWIN*)
+    case "$ARCH" in
+      x86_64|amd64) ARTIFACT="claude-go-windows-x86_64.exe" ;;
+      *) echo "error: unsupported Windows arch: $ARCH" >&2; exit 1 ;;
+    esac
+    ;;
   *)
-    echo "error: unsupported OS: $OS (this build is Linux/macOS only)" >&2
+    echo "error: unsupported OS: $OS" >&2
     exit 1
     ;;
 esac

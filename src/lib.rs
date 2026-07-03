@@ -5,6 +5,7 @@ pub mod paths;
 pub mod provider;
 pub mod proxy;
 pub mod settings;
+pub mod tty;
 pub mod tui;
 pub mod verify;
 

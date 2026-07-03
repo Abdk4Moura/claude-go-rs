@@ -1,10 +1,10 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::error::ClaudeGoError;
 use crate::models;
 use crate::paths::Paths;
 use crate::provider::{self, is_opencode_go_openai_model, CustomProviderEntry, Model, Provider, ProviderFormat, CUSTOM_URL_ID};
-use crate::proxy::ProxyState;
 use crate::settings::{self, SettingsState, TurnOnInputs};
 
 /// The TUI's top-level state machine. Three screens, one input
@@ -19,7 +19,11 @@ pub struct App {
     pub models_from_live: bool,
     pub models_loading: bool,
     pub settings: SettingsState,
-    pub proxy_state: ProxyState,
+    /// Port of the in-process proxy, if one is running in this
+    /// process. `None` when the user is on the Anthropic path or has
+    /// not yet enabled routing. Mirrors the global `PROXY` OnceCell
+    /// in `cli.rs`.
+    pub proxy_port: Option<u16>,
     pub input_buffer: String,
     pub input_active: bool,
     pub input_prompt: &'static str,
@@ -64,7 +68,7 @@ impl App {
             key_in_settings: false,
             owned: false,
         }));
-        let proxy_state = crate::proxy::Proxy::new(&paths).current_state();
+        let proxy_port = crate::cli::current_proxy_port();
         let provider_index = Self::initial_provider_index(&providers, &settings);
         let mut app = Self {
             paths,
@@ -76,7 +80,7 @@ impl App {
             models_from_live: false,
             models_loading: false,
             settings,
-            proxy_state,
+            proxy_port,
             input_buffer: String::new(),
             input_active: false,
             input_prompt: "",
@@ -226,18 +230,40 @@ impl App {
             return;
         }
 
-        // If the resolved format needs the proxy, start it now and
-        // pick a port.
+        // If the resolved format needs the proxy, start the
+        // in-process proxy now and pick a port. The TUI itself
+        // becomes a long-lived holder; the user will quit to
+        // shut it down (or run `claude-go off` in another terminal,
+        // but that won't kill our proxy -- only this process can).
         let port = if format.needs_proxy() {
-            match crate::proxy::Proxy::new(&self.paths).start(None) {
-                Ok(ProxyState::Healthy { port, .. }) => Some(port),
-                Ok(_) => {
-                    self.flash("Proxy did not become healthy".into(), StatusKind::Error);
-                    return;
-                }
-                Err(e) => {
-                    self.flash(format!("Proxy start failed: {e}"), StatusKind::Error);
-                    return;
+            // Idempotent: if PROXY is already set (we started one
+            // earlier this session), reuse it.
+            if let Some(p) = crate::cli::current_proxy_port() {
+                Some(p)
+            } else {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        self.flash(format!("async runtime: {e}"), StatusKind::Error);
+                        return;
+                    }
+                };
+                let upstream = crate::proxy::server::default_upstream();
+                let api_key = std::env::var("OPENCODE_API_KEY").ok();
+                let result = runtime.block_on(crate::proxy::start(upstream, api_key));
+                match result {
+                    Ok(handle) => {
+                        let p = handle.port();
+                        let _ = crate::cli::PROXY.set(Arc::new(handle));
+                        Some(p)
+                    }
+                    Err(e) => {
+                        self.flash(format!("Proxy start failed: {e}"), StatusKind::Error);
+                        return;
+                    }
                 }
             }
         } else {
@@ -264,7 +290,7 @@ impl App {
 
         // Refresh state and switch screens.
         self.settings = SettingsState::peek(&self.paths).unwrap_or(self.settings.clone());
-        self.proxy_state = crate::proxy::Proxy::new(&self.paths).current_state();
+        self.proxy_port = crate::cli::current_proxy_port();
         self.screen = Screen::Status;
         self.flash(
             format!("Enabled: {} / {}", p.display_name, model_id),
@@ -286,10 +312,16 @@ impl App {
             self.flash(format!("turn off failed: {e}"), StatusKind::Error);
             return;
         }
-        if self.paths.marker_file.exists()
-            && matches!(self.proxy_state, ProxyState::Healthy { .. })
-        {
-            let _ = crate::proxy::Proxy::new(&self.paths).stop();
+        // Stop the in-process proxy if we started one. The TUI is
+        // async-aware via the verify path, so we spin a small
+        // runtime here to await stop().
+        if self.proxy_port.is_some() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            if let Ok(rt) = runtime {
+                rt.block_on(crate::cli::stop_proxy_if_running());
+            }
         }
         let _ = std::fs::remove_file(&self.paths.marker_file);
         self.settings = SettingsState::peek(&self.paths).unwrap_or(SettingsState {
@@ -300,7 +332,7 @@ impl App {
             key_in_settings: false,
             owned: false,
         });
-        self.proxy_state = crate::proxy::Proxy::new(&self.paths).current_state();
+        self.proxy_port = None;
         self.flash("OpenCode Go routing disabled".into(), StatusKind::Info);
     }
 
@@ -338,7 +370,7 @@ impl App {
 
     pub fn refresh(&mut self) {
         self.settings = SettingsState::peek(&self.paths).unwrap_or(self.settings.clone());
-        self.proxy_state = crate::proxy::Proxy::new(&self.paths).current_state();
+        self.proxy_port = crate::cli::current_proxy_port();
     }
 
     /// Open the "Custom URL..." prompt.

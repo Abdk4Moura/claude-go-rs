@@ -11,13 +11,8 @@ pub struct Paths {
     pub settings_file: PathBuf,
     /// `~/.local/share/claude-go/`
     pub state_dir: PathBuf,
-    /// `~/.local/share/claude-go/proxy.pid`
-    pub proxy_pid_file: PathBuf,
-    /// `~/.local/share/claude-go/proxy.port`
-    pub proxy_port_file: PathBuf,
-    /// `~/.local/share/claude-go/proxy.log`
-    pub proxy_log_file: PathBuf,
-    /// `~/.local/share/claude-go/managed-by-claude-go` (marker)
+    /// `~/.local/share/claude-go/managed-by-claude-go` (marker so
+    /// `off` knows to strip the env block).
     pub marker_file: PathBuf,
     /// `~/.config/claude-go/providers.json`
     pub providers_file: PathBuf,
@@ -44,9 +39,6 @@ impl Paths {
         Self {
             settings_file: home.join(".claude/settings.json"),
             state_dir: state_dir.clone(),
-            proxy_pid_file: state_dir.join("proxy.pid"),
-            proxy_port_file: state_dir.join("proxy.port"),
-            proxy_log_file: state_dir.join("proxy.log"),
             marker_file: state_dir.join("managed-by-claude-go"),
             providers_file: config_dir.join("providers.json"),
             install_path: home.join(".local/bin/claude-go"),
@@ -60,9 +52,6 @@ impl Paths {
         Self {
             settings_file: home.join(".claude/settings.json"),
             state_dir: state_dir.clone(),
-            proxy_pid_file: state_dir.join("proxy.pid"),
-            proxy_port_file: state_dir.join("proxy.port"),
-            proxy_log_file: state_dir.join("proxy.log"),
             marker_file: state_dir.join("managed-by-claude-go"),
             providers_file: home.join(".config/claude-go/providers.json"),
             install_path: home.join(".local/bin/claude-go"),

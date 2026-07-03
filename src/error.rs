@@ -23,20 +23,8 @@ pub enum ClaudeGoError {
     #[error("invalid port: {0}")]
     InvalidPort(u64),
 
-    #[error("opencode-api binary not found on PATH. Install with: npm install -g opencode-api@1.0.3")]
-    ProxyBinaryMissing,
-
-    #[error("proxy failed to start on port {port}; see log at {log}")]
-    ProxyStartFailed { port: u16, log: String },
-
-    #[error("proxy is not running (no PID at {0})")]
-    ProxyNotRunning(String),
-
     #[error("provider `{0}` is not yet implemented")]
     ProviderNotImplemented(String),
-
-    #[error("no free port in 4141..=4242")]
-    NoFreePort,
 
     #[error("custom provider `{0}` already exists in providers.json")]
     ProviderAlreadyExists(String),
@@ -46,6 +34,9 @@ pub enum ClaudeGoError {
 
     #[error("provider `{0}` has no model list configured and no live fetch URL")]
     NoModelsAvailable(String),
+
+    #[error("failed to start in-process proxy: {0}")]
+    ProxyBind(String),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

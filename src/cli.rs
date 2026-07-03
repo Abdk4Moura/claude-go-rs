@@ -1,19 +1,56 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use once_cell::sync::OnceCell;
 
 use crate::paths::Paths;
 use crate::provider::{
     self, CustomProviderEntry, ProviderFormat, CUSTOM_URL_ID,
 };
-use crate::proxy::Proxy;
+use crate::proxy::ProxyHandle;
 use crate::settings::{self, SettingsState, TurnOnInputs};
+use crate::tty;
 use crate::verify;
+
+/// Process-wide handle to the in-process translation proxy. Set by
+/// `cmd_on` for OpenAI-format models; used by the TUI's status view
+/// and (in principle) by future subcommands that need to forward
+/// requests. The handle's server task is dropped when the process
+/// exits.
+pub static PROXY: OnceCell<Arc<ProxyHandle>> = OnceCell::new();
+
+/// Returns the bound port of the in-process proxy, if one is running
+/// in this process. Read-only; the TUI uses it for the status view.
+pub fn current_proxy_port() -> Option<u16> {
+    PROXY.get().map(|h| h.port())
+}
+
+/// Returns true iff a proxy is currently running in this process.
+pub fn proxy_running() -> bool {
+    PROXY.get().is_some()
+}
+
+/// Stops the in-process proxy if one is running. Returns true if a
+/// proxy was actually stopped.
+pub async fn stop_proxy_if_running() -> bool {
+    if let Some(handle) = PROXY.get() {
+        handle.stop().await;
+        true
+    } else {
+        false
+    }
+}
 
 /// claude-go: route Claude Code to any Anthropic-compatible model.
 #[derive(Debug, Parser)]
-#[command(name = "claude-go", version, about, long_about = None)]
+#[command(
+    name = "claude-go",
+    version,
+    about = "Route Claude Code to any Anthropic-compatible model",
+    long_about = "Route Claude Code to any Anthropic-compatible model. In a TTY, runs an interactive picker. Outside a TTY (pipes, cron, nohup), no-args prints status JSON for scripting."
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
@@ -21,14 +58,15 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
-    /// Enable routing. Writes ~/.claude/settings.json and starts the proxy if needed.
+    /// Enable routing. Writes ~/.claude/settings.json and starts the in-process proxy if needed.
     On {
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
         port: Option<u16>,
     },
-    /// Disable routing. Strips the owned env block, stops the proxy.
+    /// Disable routing. Strips the owned env block. If the proxy is
+    /// still running in this process, stops it too.
     Off,
     /// Show the current state.
     Status,
@@ -45,10 +83,9 @@ pub enum Cmd {
     },
     /// Install the current binary to ~/.local/bin.
     Install,
-    /// Print help.
-    Help,
-    /// Print version.
-    Version,
+    /// Launch the TUI explicitly. Same as running `claude-go` with
+    /// no arguments in a TTY.
+    Tui,
 }
 
 #[derive(Debug, Subcommand)]
@@ -70,30 +107,23 @@ pub enum ProviderCmd {
 }
 
 /// Run a CLI command. Returns the exit code (0 = success, non-zero =
-/// user-facing error).
-pub fn run(cli: Cli) -> Result<i32> {
+/// user-facing error). This is `async` because the in-process proxy
+/// needs a tokio runtime; the caller (main.rs) wraps it in
+/// `Runtime::block_on`.
+pub async fn run(cli: Cli) -> Result<i32> {
     let paths = Paths::resolve();
     let cmd = match cli.cmd {
         Some(c) => c,
         None => {
-            // No-arg = TUI (breaking change vs bash v0.1.1; called
-            // out in the README rename banner).
+            // No-arg = TUI. The TTY gate already happened in main.rs.
             return run_tui(&paths);
         }
     };
     match cmd {
-        Cmd::Help => {
-            print_help();
-            Ok(0)
-        }
-        Cmd::Version => {
-            println!("claude-go {}", env!("CARGO_PKG_VERSION"));
-            Ok(0)
-        }
-        Cmd::On { model, port } => cmd_on(&paths, model, port),
-        Cmd::Off => cmd_off(&paths),
+        Cmd::On { model, port } => cmd_on(&paths, model, port).await,
+        Cmd::Off => cmd_off(&paths).await,
         Cmd::Status => cmd_status(&paths),
-        Cmd::Verify => cmd_verify(&paths),
+        Cmd::Verify => cmd_verify(&paths).await,
         Cmd::Models => cmd_models(),
         Cmd::Providers => cmd_providers(&paths),
         Cmd::Provider { cmd } => match cmd {
@@ -107,6 +137,15 @@ pub fn run(cli: Cli) -> Result<i32> {
             ProviderCmd::Remove { name } => cmd_provider_remove(&paths, name),
         },
         Cmd::Install => cmd_install(&paths),
+        Cmd::Tui => {
+            // The explicit `tui` subcommand also requires a TTY.
+            // If invoked without one, print the hint and exit 0.
+            if !tty::should_launch_tui() {
+                eprintln!("{}", tty::TTY_REQUIRED_HINT);
+                return Ok(0);
+            }
+            run_tui(&paths)
+        }
     }
 }
 
@@ -116,7 +155,7 @@ fn run_tui(paths: &Paths) -> Result<i32> {
     Ok(0)
 }
 
-fn cmd_on(paths: &Paths, model: Option<String>, port: Option<u16>) -> Result<i32> {
+async fn cmd_on(paths: &Paths, model: Option<String>, port: Option<u16>) -> Result<i32> {
     let auth = std::env::var("OPENCODE_API_KEY").unwrap_or_default();
     if auth.is_empty() {
         eprintln!("error: OPENCODE_API_KEY is not set. Get one at https://opencode.ai/auth and re-run.");
@@ -126,17 +165,23 @@ fn cmd_on(paths: &Paths, model: Option<String>, port: Option<u16>) -> Result<i32
     let model = model.unwrap_or_else(|| "minimax-m3".into());
     let is_openai_format_model = is_known_openai_model(&model);
 
-    let port = if is_openai_format_model {
-        // Make sure the proxy is up and pick a port.
-        let p = Proxy::new(paths).start(port)?;
-        let port = match p {
-            crate::proxy::ProxyState::Healthy { port, .. } => port,
-            _ => {
-                eprintln!("error: proxy did not become healthy");
-                return Ok(1);
-            }
-        };
-        Some(port)
+    // For OpenAI-format models, start the in-process proxy. The port
+    // is OS-assigned (we ignore the `--port` arg for OpenAI-format,
+    // because there's nothing to coordinate with a sibling process
+    // anymore; the port lives only as long as this process does).
+    let proxy_port = if is_openai_format_model {
+        if port.is_some() {
+            eprintln!("note: --port is ignored for OpenAI-format models; the in-process proxy picks its own port");
+        }
+        let upstream = crate::proxy::server::default_upstream();
+        let api_key = std::env::var("OPENCODE_API_KEY").ok();
+        let handle = crate::proxy::start(upstream, api_key)
+            .await
+            .map_err(crate::error::ClaudeGoError::ProxyBind)?;
+        let p = handle.port();
+        // Stash globally so `off` and the TUI can find it.
+        let _ = PROXY.set(Arc::new(handle));
+        Some(p)
     } else {
         if let Some(p) = port {
             if !((4141..=4242).contains(&p)) {
@@ -150,21 +195,16 @@ fn cmd_on(paths: &Paths, model: Option<String>, port: Option<u16>) -> Result<i32
     // Build a synthetic "opencode-go" provider to feed into
     // `settings::turn_on`, since `on` is hardcoded to that provider
     // in the bash contract.
-    let provider = if is_openai_format_model {
-        provider::built_in_presets()
-            .into_iter()
-            .find(|p| p.id == "opencode-go")
-            .map(|mut p| {
+    let provider = provider::built_in_presets()
+        .into_iter()
+        .find(|p| p.id == "opencode-go")
+        .map(|mut p| {
+            if is_openai_format_model {
                 p.format = ProviderFormat::OpenAI;
-                p
-            })
-            .ok_or_else(|| anyhow::anyhow!("opencode-go preset not found"))?
-    } else {
-        provider::built_in_presets()
-            .into_iter()
-            .find(|p| p.id == "opencode-go")
-            .ok_or_else(|| anyhow::anyhow!("opencode-go preset not found"))?
-    };
+            }
+            p
+        })
+        .ok_or_else(|| anyhow::anyhow!("opencode-go preset not found"))?;
 
     settings::turn_on(
         paths,
@@ -176,37 +216,84 @@ fn cmd_on(paths: &Paths, model: Option<String>, port: Option<u16>) -> Result<i32
             } else {
                 ProviderFormat::Anthropic
             },
-            port,
+            port: proxy_port,
             auth_token: &auth,
         },
     )
     .context("write settings.json")?;
 
-    // Marker file so `off` knows to stop the proxy.
+    // Marker file so `off` knows to strip the env block.
     std::fs::create_dir_all(&paths.state_dir).ok();
     std::fs::write(&paths.marker_file, b"").ok();
 
     println!("OpenCode Go routing enabled");
     println!("  Path:     {}", provider.format.as_str());
     println!("  Model:    {model}");
-    if let Some(p) = port {
-        println!("  Proxy:    http://127.0.0.1:{p}");
+    if let Some(p) = proxy_port {
+        println!("  Proxy:    http://127.0.0.1:{p} (in-process)");
+        println!();
+        println!("The proxy runs in this process. To stop it, run 'claude-go off'");
+        println!("in this terminal, or send Ctrl-C / SIGINT to this process.");
+        println!();
+        println!("Claude Code is now pointed at http://127.0.0.1:{p}/v1/messages.");
+        println!("You can launch it from another terminal:");
+        println!("  claude");
     } else {
         println!("  Base:     {}", provider.base_url);
     }
     println!("  Auth:     OPENCODE_API_KEY env var");
     println!("  Config:   {}", paths.settings_file.display());
+
+    // For OpenAI-format models, keep the proxy alive by parking
+    // until SIGINT. The TUI's `verify` and Claude Code's outgoing
+    // requests need the proxy to be live.
+    if is_openai_format_model {
+        wait_for_shutdown_signal().await;
+        if let Some(handle) = PROXY.get() {
+            handle.stop().await;
+        }
+        println!();
+        println!("Proxy stopped. Claude Code will now fail to reach http://127.0.0.1:{}/v1/messages until you re-enable routing.", proxy_port.unwrap_or(0));
+    }
     Ok(0)
 }
 
-fn cmd_off(paths: &Paths) -> Result<i32> {
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigint = match signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(_) => {
+                // Fall back to Ctrl-C handler.
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(_) => {
+                sigint.recv().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = sigint.recv() => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+async fn cmd_off(paths: &Paths) -> Result<i32> {
     let was_enabled = SettingsState::peek(paths).map(|s| s.enabled).unwrap_or(false);
     settings::turn_off(paths).context("strip settings.json")?;
-    if paths.marker_file.exists() {
-        if let crate::proxy::ProxyState::Healthy { .. } = Proxy::new(paths).current_state() {
-            Proxy::new(paths).stop().context("stop proxy")?;
-            println!("proxy stopped");
-        }
+    if let Some(handle) = PROXY.get() {
+        handle.stop().await;
+        println!("proxy stopped");
     }
     let _ = std::fs::remove_file(&paths.marker_file);
     if was_enabled {
@@ -219,7 +306,6 @@ fn cmd_off(paths: &Paths) -> Result<i32> {
 
 fn cmd_status(paths: &Paths) -> Result<i32> {
     let s = SettingsState::peek(paths).context("read settings")?;
-    let proxy = Proxy::new(paths).current_state();
     if s.enabled {
         println!("OpenCode Go is ENABLED");
         println!("  State:    {}", path_kind_str(s.path_kind));
@@ -236,11 +322,11 @@ fn cmd_status(paths: &Paths) -> Result<i32> {
             }
         );
         if matches!(s.path_kind, settings::PathKind::OpenAI) {
-            match proxy {
-                crate::proxy::ProxyState::Healthy { port, pid } => {
-                    println!("  Proxy:    running on http://127.0.0.1:{port} (pid {pid})");
+            match PROXY.get() {
+                Some(handle) => {
+                    println!("  Proxy:    running on http://127.0.0.1:{} (in-process)", handle.port());
                 }
-                _ => {
+                None => {
                     println!("  Proxy:    EXPECTED BUT NOT RUNNING -- run: claude-go on");
                 }
             }
@@ -254,12 +340,8 @@ fn cmd_status(paths: &Paths) -> Result<i32> {
     Ok(0)
 }
 
-fn cmd_verify(paths: &Paths) -> Result<i32> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("build tokio runtime")?;
-    match runtime.block_on(verify::verify(paths)) {
+async fn cmd_verify(paths: &Paths) -> Result<i32> {
+    match verify::verify(paths).await {
         Ok(r) => {
             println!("{}", r.outcome.message());
             println!("  Model:    {}", r.model);
@@ -275,8 +357,6 @@ fn cmd_verify(paths: &Paths) -> Result<i32> {
 }
 
 fn cmd_models() -> Result<i32> {
-    // Iterate the hardcoded 19-model list in stable order (mirrors
-    // bash v0.1.1's fixed-order array).
     let preset = provider::built_in_presets()
         .into_iter()
         .find(|p| p.id == "opencode-go")
@@ -330,14 +410,14 @@ fn cmd_provider_add(
     models: Vec<String>,
 ) -> Result<i32> {
     if name == CUSTOM_URL_ID {
-        eprintln!("error: `{name}` is a reserved id");
+        eprintln!("error: '{name}' is a reserved id");
         return Ok(1);
     }
     let format = match format.as_str() {
         "anthropic" => ProviderFormat::Anthropic,
         "openai" => ProviderFormat::OpenAI,
         other => {
-            eprintln!("error: unknown format `{other}` (use `anthropic` or `openai`)");
+            eprintln!("error: unknown format '{other}' (use 'anthropic' or 'openai')");
             return Ok(1);
         }
     };
@@ -350,14 +430,14 @@ fn cmd_provider_add(
     };
     provider::add_custom_provider(&paths.providers_file, &name, entry)
         .context("write providers.json")?;
-    println!("Added provider `{name}`");
+    println!("Added provider '{name}'");
     Ok(0)
 }
 
 fn cmd_provider_remove(paths: &Paths, name: String) -> Result<i32> {
     provider::remove_custom_provider(&paths.providers_file, &name)
         .context("write providers.json")?;
-    println!("Removed provider `{name}`");
+    println!("Removed provider '{name}'");
     Ok(0)
 }
 
@@ -415,62 +495,17 @@ fn which(name: &str) -> Result<String> {
             return Ok(cand.display().to_string());
         }
     }
-    anyhow::bail!("`{name}` not found on PATH")
+    anyhow::bail!("'{name}' not found on PATH");
 }
 
 fn is_known_openai_model(model: &str) -> bool {
-    matches!(
-        model,
-        "glm-5.2"
-            | "glm-5.1"
-            | "glm-5"
-            | "kimi-k2.7-code"
-            | "kimi-k2.6"
-            | "kimi-k2.5"
-            | "deepseek-v4-pro"
-            | "deepseek-v4-flash"
-            | "mimo-v2.5"
-            | "mimo-v2.5-pro"
-            | "mimo-v2-pro"
-            | "mimo-v2-omni"
-            | "hy3-preview"
-    )
+    provider::is_opencode_go_openai_model(model)
 }
 
 fn path_kind_str(k: settings::PathKind) -> &'static str {
     match k {
         settings::PathKind::Anthropic => "anthropic",
-        settings::PathKind::OpenAI => "openai (via proxy)",
+        settings::PathKind::OpenAI => "openai (via in-process proxy)",
         settings::PathKind::Other => "(none)",
     }
-}
-
-fn print_help() {
-    println!("claude-go  --  route Claude Code to any Anthropic-compatible model");
-    println!();
-    println!("USAGE:");
-    println!("  claude-go                        Launch the TUI");
-    println!("  claude-go on  [--model M] [--port P]   Enable routing");
-    println!("  claude-go off                    Disable routing");
-    println!("  claude-go status                 Show current state");
-    println!("  claude-go verify                 Round-trip test against the live endpoint");
-    println!("  claude-go models                 List known models");
-    println!("  claude-go providers              List configured providers");
-    println!("  claude-go provider add NAME --url URL [--auth-header H] [--format F]");
-    println!("  claude-go provider remove NAME   Remove a custom provider");
-    println!("  claude-go install                Install to ~/.local/bin");
-    println!("  claude-go help                   This help");
-    println!();
-    println!("ENV:");
-    println!("  OPENCODE_API_KEY   Your OpenCode Go key. Required for `on` and `verify`.");
-    println!();
-    println!("FILES:");
-    println!("  Settings:  ~/.claude/settings.json");
-    println!("  State dir: ~/.local/share/claude-go/");
-    println!("  Providers: ~/.config/claude-go/providers.json");
-    println!();
-    println!("CAVEATS:");
-    println!("  Linux and macOS only in v0.1.0.");
-    println!("  The TUI requires a real terminal; for scripts, use the subcommands above.");
-    println!("  Sub-tasks (haiku/sonnet/opus) all use the main model.");
 }
