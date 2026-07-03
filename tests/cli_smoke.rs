@@ -85,7 +85,7 @@ fn version_subcommand_works_without_tty() {
     assert!(out.status.success(), "exit was {:?}", out.status);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("claude-go"));
-    assert!(stdout.contains("0.2.1"));
+    assert!(stdout.contains("0.2.2"));
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn version_subcommand_matches_long_flag() {
     let long_s = String::from_utf8_lossy(&long.stdout).to_string();
     let short_s = String::from_utf8_lossy(&short.stdout).to_string();
     let sub_s = String::from_utf8_lossy(&sub.stdout).to_string();
-    assert!(long_s.contains("0.2.1"), "long: {long_s}");
+    assert!(long_s.contains("0.2.2"), "long: {long_s}");
     assert_eq!(long_s, short_s, "--version and -V must match");
     assert_eq!(long_s, sub_s, "subcommand and --version must match");
 }

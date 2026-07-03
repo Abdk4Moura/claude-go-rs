@@ -198,6 +198,21 @@ can be removed from the TUI with `d`.
   (was ~30 MB with Node + `opencode-api`).
 - **Faster proxy startup.** ~30 ms (was ~500 ms Node cold start).
 
+## v0.2.2 changes (from v0.2.1)
+
+v0.2.0 introduced a tokio panic in the no-args TUI launch path that
+was not caught by the v0.2.0 / v0.2.1 smoke tests because those tests
+verified only the CLI subcommand path, not the TUI entrypoint. The
+TUI's `App::new` built a *second* tokio runtime and called `block_on`
+on it from inside the outer runtime that `main.rs` had already
+started, which panics with "Cannot start a runtime from within a
+runtime". v0.2.2 fixes the panic (the blocking call now uses
+`tokio::task::block_in_place` on the existing multi-thread runtime
+instead of constructing a nested one) and adds a regression test
+(`tests/tui_launch_regression.rs`) that launches the no-args path
+headlessly and asserts the marker file gets written, so a TUI crash
+can never ship undetected again.
+
 ## Development
 
 ```sh

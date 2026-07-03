@@ -7,6 +7,23 @@ use crate::paths::Paths;
 use crate::provider::{self, is_opencode_go_openai_model, CustomProviderEntry, Model, Provider, ProviderFormat, CUSTOM_URL_ID};
 use crate::settings::{self, SettingsState, TurnOnInputs};
 
+/// Drive an async future to completion from the sync TUI event loop.
+/// `main.rs` runs a multi-threaded tokio runtime and wraps the whole
+/// CLI in `runtime.block_on(run(cli))`, so the TUI lives inside that
+/// runtime context. Building a *new* runtime and calling its
+/// `block_on` from here panics ("Cannot start a runtime from within
+/// a runtime"). `tokio::task::block_in_place` is the sanctioned
+/// escape hatch on multi-thread runtimes: it parks the current worker
+/// thread and lets the pool's other workers keep driving async tasks
+/// while we wait.
+fn block_on<F, T>(fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::block_in_place(|| handle.block_on(fut))
+}
+
 /// The TUI's top-level state machine. Three screens, one input
 /// buffer for the "Custom URL..." entry.
 pub struct App {
@@ -152,18 +169,7 @@ impl App {
                 // worst.
                 self.models_loading = true;
                 let fallback = fallback.clone();
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(_) => {
-                        self.models = fallback;
-                        self.models_loading = false;
-                        return;
-                    }
-                };
-                let (models, from_live) = runtime.block_on(models::opencode_go_models());
+                let (models, from_live) = block_on(models::opencode_go_models());
                 self.models = if models.is_empty() { fallback } else { models };
                 self.models_from_live = from_live;
                 self.models_loading = false;
@@ -241,19 +247,9 @@ impl App {
             if let Some(p) = crate::cli::current_proxy_port() {
                 Some(p)
             } else {
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        self.flash(format!("async runtime: {e}"), StatusKind::Error);
-                        return;
-                    }
-                };
                 let upstream = crate::proxy::server::default_upstream();
                 let api_key = std::env::var("OPENCODE_API_KEY").ok();
-                let result = runtime.block_on(crate::proxy::start(upstream, api_key));
+                let result = block_on(crate::proxy::start(upstream, api_key));
                 match result {
                     Ok(handle) => {
                         let p = handle.port();
@@ -309,15 +305,10 @@ impl App {
             return;
         }
         // Stop the in-process proxy if we started one. The TUI is
-        // async-aware via the verify path, so we spin a small
-        // runtime here to await stop().
+        // async-aware via the verify path, so block the worker thread
+        // briefly to await stop().
         if self.proxy_port.is_some() {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            if let Ok(rt) = runtime {
-                rt.block_on(crate::cli::stop_proxy_if_running());
-            }
+            let _ = block_on(crate::cli::stop_proxy_if_running());
         }
         self.settings = SettingsState::peek(&self.paths).unwrap_or(SettingsState {
             enabled: false,
@@ -332,17 +323,8 @@ impl App {
     }
 
     pub fn verify(&mut self) {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                self.flash(format!("async runtime: {e}"), StatusKind::Error);
-                return;
-            }
-        };
-        match runtime.block_on(crate::verify::verify(&self.paths)) {
+        let result = block_on(crate::verify::verify(&self.paths));
+        match result {
             Ok(r) => {
                 self.verify_result = Some(VerifySnapshot {
                     outcome: r.outcome,

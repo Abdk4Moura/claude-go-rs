@@ -62,6 +62,15 @@ pub async fn stop_proxy_if_running() -> bool {
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
+
+    /// Hidden test-only flag. When set, the no-args path bypasses the
+    /// TTY gate and the status-JSON fallback, builds the TUI's `App`
+    /// (the exact call that panicked in v0.2.0/v0.2.1 due to a nested
+    /// tokio `block_on`), writes the literal `launched\n` to `<path>`
+    /// on success, then exits 0 without touching the terminal. Lets
+    /// CI prove the no-args path no longer panics, without a PTY.
+    #[arg(long, hide = true)]
+    pub regression_marker: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -167,6 +176,29 @@ fn run_tui(paths: &Paths) -> Result<i32> {
     let app = crate::tui::App::new(paths.clone());
     crate::tui::run(app)?;
     Ok(0)
+}
+
+/// Test-only entrypoint. Builds the same `App` the no-args TUI path
+/// builds (the exact call that panicked in v0.2.0 / v0.2.1 because
+/// `maybe_load_models_for_selection` started a nested tokio runtime
+/// and called `block_on` from inside the outer runtime), writes
+/// `launched\n` to `marker` on success, then returns. Never touches
+/// the terminal, so CI can prove the no-args path no longer panics
+/// without a real PTY.
+pub fn run_tui_regression(marker: PathBuf) -> Result<i32> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build regression runtime")?;
+    runtime.block_on(async {
+        let paths = Paths::resolve();
+        // The panic lived inside App::new -> maybe_load_models_for_selection
+        // -> nested block_on. If this call returns, the regression is fixed.
+        let _app = crate::tui::App::new(paths);
+        std::fs::write(&marker, b"launched\n")
+            .with_context(|| format!("write regression marker {}", marker.display()))?;
+        Ok::<_, anyhow::Error>(0)
+    })
 }
 
 async fn cmd_on(paths: &Paths, model: Option<String>, port: Option<u16>) -> Result<i32> {

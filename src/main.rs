@@ -12,6 +12,16 @@ fn main() -> Result<()> {
     let has_subcommand = cli.cmd.is_some();
     let tty_ok = claude_go::tty::should_launch_tui();
 
+    // Test-only bypass: drive `App::new` (the exact call site of the
+    // v0.2.1 nested-block_on panic) headlessly, write a sentinel
+    // file, exit. Skips both the TTY gate and the status-JSON
+    // fallback so CI can assert the no-args path no longer panics
+    // without a real PTY.
+    if let Some(marker) = cli.regression_marker.clone() {
+        let code = claude_go::cli::run_tui_regression(marker)?;
+        std::process::exit(code);
+    }
+
     if !has_subcommand && !tty_ok {
         // No subcommand, no TTY: print status JSON and exit. Scripts
         // can `claude-go | jq '.enabled'` to branch.
