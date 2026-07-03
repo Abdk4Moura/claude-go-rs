@@ -49,6 +49,11 @@ jobs:
           # the same `target/` (otherwise object files get
           # cross-linked and rust-lld fails).
           CARGO_TARGET_DIR: target-${{ matrix.target }}
+          # ring cross-compile: use pre-generated assembly instead
+          # of compiling from C. This avoids the cc/cc-rs issue
+          # where the host compiler produces x86_64 objects for
+          # the aarch64 target.
+          RING_PREGENERATE_ASM: 1
 
       - name: Stage binary
         run: |
