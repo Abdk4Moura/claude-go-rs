@@ -19,7 +19,7 @@ j/k or arrows  move     Enter  select     a  add custom     d  remove custom
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Abdk4Moura/claude-go-rs/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Abdk4Moura/claude-go/main/install.sh | bash
 ```
 
 This downloads the right binary for your OS/arch from the latest GitHub
@@ -29,7 +29,7 @@ release and installs it to `~/.local/bin/claude-go`. Make sure
 Want a specific version?
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Abdk4Moura/claude-go-rs/main/install.sh | bash -s -- v0.1.0
+curl -fsSL https://raw.githubusercontent.com/Abdk4Moura/claude-go/main/install.sh | bash -s -- v0.1.0
 ```
 
 ## Quick start

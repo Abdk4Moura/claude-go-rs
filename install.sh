@@ -4,17 +4,17 @@
 # from the latest GitHub release and install it to ~/.local/bin.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Abdk4Moura/claude-go-rs/main/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/Abdk4Moura/claude-go-rs/main/install.sh | bash -s -- v0.1.0
+#   curl -fsSL https://raw.githubusercontent.com/Abdk4Moura/claude-go/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Abdk4Moura/claude-go/main/install.sh | bash -s -- v0.1.0
 #   curl -fsSL ... | bash -s -- --system  # install to /usr/local/bin (requires sudo)
 #
 # Environment:
-#   CLAUDE_GO_REPO  Override the GitHub repo (default Abdk4Moura/claude-go-rs).
+#   CLAUDE_GO_REPO  Override the GitHub repo (default Abdk4Moura/claude-go).
 #   CLAUDE_GO_BIN   Override the install path (default ~/.local/bin/claude-go).
 
 set -euo pipefail
 
-REPO="${CLAUDE_GO_REPO:-Abdk4Moura/claude-go-rs}"
+REPO="${CLAUDE_GO_REPO:-Abdk4Moura/claude-go}"
 VERSION="${1:-}"
 
 case "${VERSION:-}" in
