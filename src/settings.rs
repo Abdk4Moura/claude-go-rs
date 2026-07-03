@@ -16,7 +16,6 @@ use crate::provider::{Provider, ProviderFormat};
 pub const OWNED_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
     "ANTHROPIC_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -250,7 +249,7 @@ pub fn turn_off(paths: &Paths) -> Result<(), ClaudeGoError> {
 fn env_value_for(key: &str, base_url: &str, model: &str, auth: &str) -> String {
     match key {
         "ANTHROPIC_BASE_URL" => base_url.to_string(),
-        "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_API_KEY" => auth.to_string(),
+        "ANTHROPIC_AUTH_TOKEN" => auth.to_string(),
         "ANTHROPIC_MODEL"
         | "ANTHROPIC_DEFAULT_HAIKU_MODEL"
         | "ANTHROPIC_DEFAULT_SONNET_MODEL"
@@ -337,11 +336,64 @@ mod tests {
     fn owned_marker_and_keys_are_stable() {
         // This is a contract test -- if it ever changes, downstream
         // Claude Code installations will see a different env block.
-        assert_eq!(OWNED_ENV_KEYS.len(), 9);
+        // 8 owned env keys + 1 ownership marker = 9 keys total in
+        // the env block written by `turn_on`. `ANTHROPIC_API_KEY` is
+        // intentionally NOT written: setting both `ANTHROPIC_API_KEY`
+        // and `ANTHROPIC_AUTH_TOKEN` to the same value trips a
+        // cosmetic startup-banner warning in Claude Code.
+        assert_eq!(OWNED_ENV_KEYS.len(), 8);
         assert!(OWNED_ENV_KEYS.contains(&"ANTHROPIC_BASE_URL"));
+        assert!(OWNED_ENV_KEYS.contains(&"ANTHROPIC_AUTH_TOKEN"));
+        assert!(!OWNED_ENV_KEYS.contains(&"ANTHROPIC_API_KEY"));
         assert!(OWNED_ENV_KEYS.contains(&"ANTHROPIC_DEFAULT_HAIKU_MODEL"));
         assert!(OWNED_ENV_KEYS.contains(&"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"));
         assert_eq!(OWNERSHIP_MARKER, "__claude_go_owned");
+    }
+
+    #[test]
+    fn turn_on_writes_exactly_nine_keys() {
+        // The env block written by `turn_on` must contain exactly 9
+        // keys: the 8 OWNED_ENV_KEYS plus the OWNERSHIP_MARKER. No
+        // extra keys (e.g. ANTHROPIC_API_KEY) -- the bash v0.1.1
+        // contract wrote 10, which silenced Claude Code's warning
+        // banner.
+        let dir = fresh_dir("nine-keys");
+        let paths = test_paths(&dir);
+        let provider = make_provider();
+
+        turn_on(
+            &paths,
+            &TurnOnInputs {
+                provider: &provider,
+                model: "minimax-m3",
+                format: ProviderFormat::Anthropic,
+                port: None,
+                auth_token: "sk-test",
+            },
+        )
+        .unwrap();
+
+        let raw = std::fs::read_to_string(&paths.settings_file).unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        let env = v.get("env").and_then(|o| o.as_object()).unwrap();
+
+        // Exactly 8 owned keys + 1 marker = 9.
+        assert_eq!(env.len(), 9);
+
+        // All 8 owned keys are present.
+        for k in OWNED_ENV_KEYS {
+            assert!(env.contains_key(*k), "missing owned key: {k}");
+        }
+        // Marker is present.
+        assert_eq!(env.get(OWNERSHIP_MARKER).unwrap(), "1");
+
+        // ANTHROPIC_API_KEY is NOT present (we dropped it in v0.2.1).
+        assert!(!env.contains_key("ANTHROPIC_API_KEY"));
+
+        // Spot-check a few values.
+        assert_eq!(env.get("ANTHROPIC_AUTH_TOKEN").unwrap(), "sk-test");
+        assert_eq!(env.get("ANTHROPIC_MODEL").unwrap(), "minimax-m3");
+        assert_eq!(env.get("DISABLE_TELEMETRY").unwrap(), "1");
     }
 
     #[test]

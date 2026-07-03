@@ -85,7 +85,29 @@ fn version_subcommand_works_without_tty() {
     assert!(out.status.success(), "exit was {:?}", out.status);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("claude-go"));
-    assert!(stdout.contains("0.2.0"));
+    assert!(stdout.contains("0.2.1"));
+}
+
+#[test]
+fn version_subcommand_matches_long_flag() {
+    // `claude-go version`, `claude-go --version`, and `claude-go -V`
+    // must all produce the same `claude-go <version>` string. The
+    // `version` subcommand was added in v0.2.1 to match the v0.1.1
+    // bash contract; the assertion guards against drift between the
+    // three output paths.
+    let long = cmd().arg("--version").output().expect("spawn --version");
+    let short = cmd().arg("-V").output().expect("spawn -V");
+    let sub = cmd().arg("version").output().expect("spawn version");
+
+    for (label, out) in [("long", &long), ("short", &short), ("sub", &sub)] {
+        assert!(out.status.success(), "{label} exit was {:?}", out.status);
+    }
+    let long_s = String::from_utf8_lossy(&long.stdout).to_string();
+    let short_s = String::from_utf8_lossy(&short.stdout).to_string();
+    let sub_s = String::from_utf8_lossy(&sub.stdout).to_string();
+    assert!(long_s.contains("0.2.1"), "long: {long_s}");
+    assert_eq!(long_s, short_s, "--version and -V must match");
+    assert_eq!(long_s, sub_s, "subcommand and --version must match");
 }
 
 #[test]

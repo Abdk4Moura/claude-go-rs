@@ -284,10 +284,6 @@ impl App {
             return;
         }
 
-        // Drop a marker file so `off` knows to stop the proxy.
-        let _ = std::fs::create_dir_all(&self.paths.state_dir);
-        let _ = std::fs::write(&self.paths.marker_file, b"");
-
         // Refresh state and switch screens.
         self.settings = SettingsState::peek(&self.paths).unwrap_or(self.settings.clone());
         self.proxy_port = crate::cli::current_proxy_port();
@@ -323,7 +319,6 @@ impl App {
                 rt.block_on(crate::cli::stop_proxy_if_running());
             }
         }
-        let _ = std::fs::remove_file(&self.paths.marker_file);
         self.settings = SettingsState::peek(&self.paths).unwrap_or(SettingsState {
             enabled: false,
             base_url: String::new(),

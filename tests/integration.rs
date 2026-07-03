@@ -55,15 +55,17 @@ fn on_writes_correct_settings_json() {
     let raw = std::fs::read_to_string(&paths.settings_file).unwrap();
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let env = v.get("env").and_then(|o| o.as_object()).unwrap();
-    // 9 owned keys + 1 marker = 10.
-    assert_eq!(env.len(), 10);
+    // 8 owned keys + 1 marker = 9. `ANTHROPIC_API_KEY` was dropped in
+    // v0.2.1: writing both `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`
+    // to the same value trips a cosmetic warning banner in Claude Code.
+    assert_eq!(env.len(), 9);
     assert_eq!(env["ANTHROPIC_BASE_URL"], "https://opencode.ai/zen/go");
     assert_eq!(env["ANTHROPIC_MODEL"], "minimax-m3");
     assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "minimax-m3");
     assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "minimax-m3");
     assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], "minimax-m3");
     assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], "sk-test");
-    assert_eq!(env["ANTHROPIC_API_KEY"], "sk-test");
+    assert!(env.get("ANTHROPIC_API_KEY").is_none());
     assert_eq!(env["DISABLE_TELEMETRY"], "1");
     assert_eq!(env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1");
     assert_eq!(env["__claude_go_owned"], "1");
@@ -139,7 +141,7 @@ fn off_preserves_user_owned_env_vars() {
     assert_eq!(env["PATH_EXTRA"], "/opt/mything/bin");
     // The marker must be gone after off.
     assert!(env.get("__claude_go_owned").is_none());
-    // The 9 owned keys must be gone too.
+    // The 8 owned keys must be gone too.
     assert!(env.get("ANTHROPIC_BASE_URL").is_none());
     assert!(env.get("ANTHROPIC_AUTH_TOKEN").is_none());
 }

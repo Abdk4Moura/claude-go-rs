@@ -14,6 +14,14 @@ use crate::settings::{self, SettingsState, TurnOnInputs};
 use crate::tty;
 use crate::verify;
 
+/// Print the version banner. Single source of truth for the
+/// `claude-go <version>` string -- both `--version`/`-V` (via clap's
+/// `version` attribute) and the `version` subcommand route through
+/// here so the two paths are guaranteed to produce identical output.
+fn print_version() {
+    println!("claude-go {}", env!("CARGO_PKG_VERSION"));
+}
+
 /// Process-wide handle to the in-process translation proxy. Set by
 /// `cmd_on` for OpenAI-format models; used by the TUI's status view
 /// and (in principle) by future subcommands that need to forward
@@ -86,6 +94,8 @@ pub enum Cmd {
     /// Launch the TUI explicitly. Same as running `claude-go` with
     /// no arguments in a TTY.
     Tui,
+    /// Print the version of claude-go.
+    Version,
 }
 
 #[derive(Debug, Subcommand)]
@@ -145,6 +155,10 @@ pub async fn run(cli: Cli) -> Result<i32> {
                 return Ok(0);
             }
             run_tui(&paths)
+        }
+        Cmd::Version => {
+            print_version();
+            Ok(0)
         }
     }
 }
@@ -222,10 +236,6 @@ async fn cmd_on(paths: &Paths, model: Option<String>, port: Option<u16>) -> Resu
     )
     .context("write settings.json")?;
 
-    // Marker file so `off` knows to strip the env block.
-    std::fs::create_dir_all(&paths.state_dir).ok();
-    std::fs::write(&paths.marker_file, b"").ok();
-
     println!("OpenCode Go routing enabled");
     println!("  Path:     {}", provider.format.as_str());
     println!("  Model:    {model}");
@@ -295,7 +305,6 @@ async fn cmd_off(paths: &Paths) -> Result<i32> {
         handle.stop().await;
         println!("proxy stopped");
     }
-    let _ = std::fs::remove_file(&paths.marker_file);
     if was_enabled {
         println!("OpenCode Go routing disabled. Claude Code will use the default Anthropic endpoint.");
     } else {
