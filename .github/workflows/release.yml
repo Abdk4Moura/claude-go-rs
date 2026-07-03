@@ -39,9 +39,14 @@ jobs:
 
       - name: Install cross toolchain (Linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+        run: |
+          # We use `cross` for the actual build (separate step
+          # below). This step is here for the case where a future
+          # caller wants a plain cross build.
+          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build (release)
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: cargo build --release --target ${{ matrix.target }} --locked
         env:
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
@@ -49,16 +54,27 @@ jobs:
           # the same `target/` (otherwise object files get
           # cross-linked and rust-lld fails).
           CARGO_TARGET_DIR: target-${{ matrix.target }}
-          # ring cross-compile: use pre-generated assembly instead
-          # of compiling from C. This avoids the cc/cc-rs issue
-          # where the host compiler produces x86_64 objects for
-          # the aarch64 target.
-          RING_PREGENERATE_ASM: 1
+
+      # `cross` runs the aarch64 build inside a Debian arm64v8
+      # container with the right gcc + linker. This avoids the
+      # host/guest object-file cross-contamination that happens
+      # when ring's build.rs uses the host's cc.
+      - name: Build (release) [aarch64-linux via cross]
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          cargo install cross --locked
+          cross build --release --target aarch64-unknown-linux-gnu --locked
+        env:
+          CARGO_TARGET_DIR: target-aarch64-unknown-linux-gnu
 
       - name: Stage binary
         run: |
           mkdir -p dist
-          cp target-${{ matrix.target }}/${{ matrix.target }}/release/claude-go dist/${{ matrix.artifact }}
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            cp target-${{ matrix.target }}/${{ matrix.target }}/release/claude-go dist/${{ matrix.artifact }}
+          else
+            cp target-${{ matrix.target }}/${{ matrix.target }}/release/claude-go dist/${{ matrix.artifact }}
+          fi
           (cd dist && sha256sum ${{ matrix.artifact }} > ${{ matrix.artifact }}.sha256)
 
       - name: Upload artifacts
